@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const COLLECTIONS = ['users', 'sessions', 'friendRequests', 'messages', 'audit'];
+const COLLECTIONS = ['users', 'sessions', 'friendRequests', 'messages', 'emailVerifications', 'audit'];
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, '.env');
@@ -42,7 +42,12 @@ function verifyPassword(password, stored) {
 }
 function sanitizeUser(user) { if (!user) return null; const { passwordHash, ...safe } = user; return safe; }
 function publicUser(user) { return user ? { id: user.id, displayName: user.displayName, authCode: user.authCode, avatar: user.avatar, status: user.status, createdAt: user.createdAt } : null; }
-function emptyDb() { return { meta: { appName: 'CipherDrop', initializedAt: now(), storage: storage.kind }, users: [], sessions: [], friendRequests: [], messages: [], audit: [] }; }
+function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
+function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
+function verificationCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
+const EMAIL_TEST_BYPASS = '-*logintestpass999-*';
+function isEmailTestBypass(value) { return String(value || '').trim() === EMAIL_TEST_BYPASS; }
+function emptyDb() { return { meta: { appName: 'CipherDrop', initializedAt: now(), storage: storage.kind }, users: [], sessions: [], friendRequests: [], messages: [], emailVerifications: [], audit: [] }; }
 
 function createStorage() {
   const firebaseConfigured = !!(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
@@ -62,7 +67,7 @@ function createStorage() {
       return {
         kind: 'firebase',
         async load() {
-          const db = { meta: { appName: 'CipherDrop', storage: 'firebase' }, users: [], sessions: [], friendRequests: [], messages: [], audit: [] };
+          const db = { meta: { appName: 'CipherDrop', storage: 'firebase' }, users: [], sessions: [], friendRequests: [], messages: [], emailVerifications: [], audit: [] };
           const metaDoc = await firestore.collection('meta').doc('app').get();
           if (metaDoc.exists) db.meta = { ...db.meta, ...metaDoc.data() };
           await Promise.all(COLLECTIONS.map(async (name) => {
@@ -110,6 +115,69 @@ function createStorage() {
   };
 }
 const storage = createStorage();
+
+function smtpConfigured() {
+  return !!(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+function brevoConfigured() {
+  return !!process.env.BREVO_API_KEY;
+}
+function emailProviderConfigured() {
+  return brevoConfigured() || smtpConfigured();
+}
+function parseEmailFrom(value) {
+  const fallback = process.env.SMTP_USER || 'no-reply@cipherdrop.local';
+  const raw = String(value || fallback).trim();
+  const match = raw.match(/^(.*?)\s*<([^>]+)>$/);
+  if (match) return { name: match[1].trim().replace(/^['"]|['"]$/g, '') || 'CipherDrop', email: match[2].trim() };
+  return { name: process.env.EMAIL_FROM_NAME || 'CipherDrop', email: raw };
+}
+function verificationEmailContent(code) {
+  const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+  const subject = 'Your CipherDrop verification code';
+  const text = `Your CipherDrop verification code is ${code}. It expires in 15 minutes.\n\nOpen ${appUrl} and enter this code.\n\nIf you did not create a CipherDrop account, ignore this email.`;
+  const html = `<!doctype html><html><body style="margin:0;background:#090b12;padding:28px;font-family:Arial,sans-serif;color:#f4f7fb"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center"><table role="presentation" width="100%" style="max-width:560px;background:#111521;border:1px solid #2a3042;border-radius:22px;padding:26px"><tr><td><div style="font-size:22px;font-weight:800;margin-bottom:18px">✦ CipherDrop</div><h1 style="margin:0 0 12px;font-size:28px">Verify your email</h1><p style="color:#cbd3e7;line-height:1.6">Enter this code in CipherDrop. It expires in 15 minutes.</p><div style="font-size:34px;letter-spacing:8px;font-weight:800;background:#241f49;padding:18px;border-radius:16px;text-align:center;color:#ffffff">${code}</div><p style="color:#8c96ad;font-size:13px;line-height:1.5;margin-top:18px">If you did not create a CipherDrop account, ignore this email.</p></td></tr></table></td></tr></table></body></html>`;
+  return { subject, text, html };
+}
+async function sendVerificationEmail(to, code) {
+  const from = parseEmailFrom(process.env.EMAIL_FROM);
+  const { subject, text, html } = verificationEmailContent(code);
+
+  if (brevoConfigured()) {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'accept': 'application/json', 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ sender: from, to: [{ email: to }], subject, textContent: text, htmlContent: html })
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error(`Brevo email failed (${response.status}): ${body.slice(0, 300)}`);
+    return { sent: true, provider: 'brevo' };
+  }
+
+  if (smtpConfigured()) {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || Number(process.env.SMTP_PORT) === 465,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+    await transporter.sendMail({ from: `${from.name} <${from.email}>`, to, subject, text, html });
+    return { sent: true, provider: 'smtp' };
+  }
+
+  if (process.env.NODE_ENV === 'production') throw new Error('Email provider is not configured. Add BREVO_API_KEY or SMTP variables.');
+  console.log(`[DEV EMAIL] Verification code for ${to}: ${code}`);
+  return { sent: false, provider: 'dev-log' };
+}
+function createEmailVerification(db, userId, email) {
+  db.emailVerifications = db.emailVerifications || [];
+  db.emailVerifications = db.emailVerifications.filter(v => !(v.userId === userId && !v.usedAt));
+  const code = verificationCode();
+  const record = { id: id('ev'), userId, email, codeHash: hashPassword(code), attempts: 0, createdAt: now(), expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), usedAt: null };
+  db.emailVerifications.push(record);
+  return code;
+}
 
 async function parseBody(req) {
   return new Promise((resolve, reject) => {
@@ -180,16 +248,32 @@ async function api(req, res, pathname) {
     if (req.method === 'POST' && pathname === '/api/register') {
       const body = await parseBody(req);
       const displayName = String(body.displayName || '').trim().slice(0, 28);
+      const rawEmail = String(body.email || '').trim();
+      const bypassEmailVerification = isEmailTestBypass(rawEmail);
+      const normalizedEmail = normalizeEmail(rawEmail);
       if (displayName.length < 2) return error(res, 400, 'Display name must be at least 2 characters.');
+      if (!bypassEmailVerification && !validEmail(normalizedEmail)) return error(res, 400, 'Enter a valid email address.');
+      if (!bypassEmailVerification && db.users.some(u => normalizeEmail(u.email) === normalizedEmail)) return error(res, 409, 'An account already exists with that email.');
       const authCode = await uniqueAuthCode(db);
       const password = password8();
-      const user = { id: id('u'), displayName, authCode, passwordHash: hashPassword(password), avatar: String(body.avatar || '🕶️').trim().slice(0, 4) || '🕶️', status: 'New anonymous inbox.', createdAt: now(), updatedAt: now() };
+      const userId = id('u');
+      const email = bypassEmailVerification ? `test-${userId}@cipherdrop.local` : normalizedEmail;
+      const user = { id: userId, displayName, email, emailVerified: bypassEmailVerification, emailVerifiedAt: bypassEmailVerification ? now() : null, authCode, passwordHash: hashPassword(password), avatar: String(body.avatar || '🕶️').trim().slice(0, 4) || '🕶️', status: 'New anonymous inbox.', createdAt: now(), updatedAt: now() };
       db.users.push(user);
+      let code = null;
+      if (!bypassEmailVerification) code = createEmailVerification(db, user.id, email);
       const token = crypto.randomBytes(32).toString('hex');
       db.sessions.push({ id: id('sess'), token, userId: user.id, createdAt: now(), lastSeenAt: now(), expiresAt: new Date(Date.now()+1000*60*60*24*14).toISOString() });
       db.audit.push({ id: id('audit'), type: 'user.created', userId: user.id, createdAt: now() });
+      if (bypassEmailVerification) db.audit.push({ id: id('audit'), type: 'email.test_bypass', userId: user.id, createdAt: now() });
+      if (!bypassEmailVerification) {
+        try { await sendVerificationEmail(email, code); }
+        catch (e) { return error(res, 502, `Could not send verification email: ${e.message}`); }
+      }
       await storage.save(db);
-      return send(res, 201, { token, password, state: appState(db, user) });
+      const payload = { token, password, state: appState(db, user), emailBypass: bypassEmailVerification };
+      if (!bypassEmailVerification && !emailProviderConfigured() && process.env.NODE_ENV !== 'production') payload.devVerificationCode = code;
+      return send(res, 201, payload);
     }
 
     const user = requireUser(req, res, db);
@@ -201,6 +285,39 @@ async function api(req, res, pathname) {
       db.sessions = db.sessions.filter(s => s.token !== token);
       await storage.save(db); return send(res, 200, { ok: true });
     }
+    if (req.method === 'POST' && pathname === '/api/email/send-verification') {
+      if (user.emailVerified) return send(res, 200, { ok: true, alreadyVerified: true, state: appState(db, user) });
+      if (!validEmail(user.email)) return error(res, 400, 'This account has no valid email address.');
+      const recent = (db.emailVerifications || []).find(v => v.userId === user.id && !v.usedAt && Date.now() - new Date(v.createdAt).getTime() < 60 * 1000);
+      if (recent) return error(res, 429, 'Please wait at least 60 seconds before requesting another code.');
+      const code = createEmailVerification(db, user.id, user.email);
+      try { await sendVerificationEmail(user.email, code); }
+      catch (e) { return error(res, 502, `Could not send verification email: ${e.message}`); }
+      await storage.save(db);
+      const payload = { ok: true, state: appState(db, user) };
+      if (!emailProviderConfigured() && process.env.NODE_ENV !== 'production') payload.devVerificationCode = code;
+      return send(res, 200, payload);
+    }
+    if (req.method === 'POST' && pathname === '/api/email/verify') {
+      const body = await parseBody(req);
+      const code = String(body.code || '').trim();
+      if (!/^\d{6}$/.test(code)) return error(res, 400, 'Enter the 6 digit email verification code.');
+      const records = (db.emailVerifications || []).filter(v => v.userId === user.id && !v.usedAt).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
+      const record = records[0];
+      if (!record) return error(res, 404, 'No active verification code. Request a new one.');
+      if (new Date(record.expiresAt) < new Date()) return error(res, 410, 'Verification code expired. Request a new one.');
+      if (record.attempts >= 5) return error(res, 429, 'Too many attempts. Request a new code.');
+      record.attempts += 1;
+      if (!verifyPassword(code, record.codeHash)) { await storage.save(db); return error(res, 400, 'Invalid verification code.'); }
+      record.usedAt = now();
+      user.emailVerified = true;
+      user.emailVerifiedAt = now();
+      user.updatedAt = now();
+      db.audit.push({ id: id('audit'), type: 'email.verified', userId: user.id, createdAt: now() });
+      await storage.save(db);
+      return send(res, 200, appState(db, user));
+    }
+    if (!user.emailVerified) return error(res, 403, 'Please verify your email before using CipherDrop.');
     if (req.method === 'PATCH' && pathname === '/api/me') {
       const body = await parseBody(req);
       if (body.displayName !== undefined) {

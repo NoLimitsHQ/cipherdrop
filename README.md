@@ -4,7 +4,8 @@ Anonymous one-time messaging app with auth-code login, request approval, CRUD fl
 
 ## Features
 
-- Account creation with generated 6 digit auth code and 8 digit password
+- Account creation with email verification
+- Generated 6 digit auth code and 8 digit password
 - Password hashing on the server
 - Login by auth code + password
 - Add users by auth code
@@ -50,6 +51,32 @@ FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY----
 ```
 
 Important: keep `FIREBASE_PRIVATE_KEY` secret. Do not put it in frontend code or commit it to GitHub.
+
+## Email verification setup
+
+Firebase stores your data, but it does not send the custom verification emails for this app. Add SMTP credentials from an email provider.
+
+Good providers:
+
+- SendGrid
+- Mailgun
+- Brevo
+- Amazon SES
+- Gmail App Password for small testing only
+
+Required environment variables:
+
+```bash
+APP_URL="https://your-live-app-url.com"
+EMAIL_FROM="CipherDrop <no-reply@your-domain.com>"
+SMTP_HOST="smtp.your-provider.com"
+SMTP_PORT="587"
+SMTP_SECURE="false"
+SMTP_USER="your-smtp-username"
+SMTP_PASS="your-smtp-password"
+```
+
+If SMTP variables are missing in local development, the server logs the verification code to the terminal. In production, configure SMTP before launch.
 
 ## Deployment notes
 
