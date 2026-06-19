@@ -17,7 +17,7 @@ function toast(msg){ const el=document.createElement('div'); el.textContent=msg;
 function esc(s=''){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function fmt(d){return new Date(d).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});}
 function contactName(id){return state?.contacts.find(c=>c.user.id===id)?.user.displayName || (state?.messages.find(m=>m.fromUserId===id)?.fromUser?.displayName) || (state?.messages.find(m=>m.toUserId===id)?.toUser?.displayName) || 'Unknown';}
-function setView(v){ view=v; localStorage.setItem('cipher_view', v); render(); }
+function setView(v){ view=v; localStorage.setItem('cipher_view', v); renderShell(); }
 function counts(){
   const unread = state?.messages.filter(m=>m.toUserId===state.user.id && m.status==='unread').length || 0;
   const reqs = state?.requests.filter(r=>r.toUserId===state.user.id && r.status==='pending').length || 0;
