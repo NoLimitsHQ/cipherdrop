@@ -1,0 +1,93 @@
+const $ = (s, el=document) => el.querySelector(s);
+const app = $('#app');
+const toastEl = $('#toast');
+let token = localStorage.getItem('cipher_token') || '';
+let state = null;
+let view = localStorage.getItem('cipher_view') || 'dashboard';
+let loading = false;
+let authTab = 'login';
+
+const api = async (url, opts={}) => {
+  const res = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', ...(token ? {Authorization:`Bearer ${token}`} : {}), ...(opts.headers||{}) }});
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok) throw new Error(data.error || 'Something went wrong');
+  return data;
+};
+function toast(msg){ const el=document.createElement('div'); el.textContent=msg; toastEl.appendChild(el); setTimeout(()=>el.remove(),3400); }
+function esc(s=''){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function fmt(d){return new Date(d).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});}
+function contactName(id){return state?.contacts.find(c=>c.user.id===id)?.user.displayName || (state?.messages.find(m=>m.fromUserId===id)?.fromUser?.displayName) || (state?.messages.find(m=>m.toUserId===id)?.toUser?.displayName) || 'Unknown';}
+function setView(v){ view=v; localStorage.setItem('cipher_view', v); render(); }
+function counts(){
+  const unread = state?.messages.filter(m=>m.toUserId===state.user.id && m.status==='unread').length || 0;
+  const reqs = state?.requests.filter(r=>r.toUserId===state.user.id && r.status==='pending').length || 0;
+  return {unread, reqs, contacts: state?.contacts.length||0, sent: state?.messages.filter(m=>m.fromUserId===state.user.id).length||0};
+}
+
+async function init(){
+  if (!token) return renderAuth();
+  loading = true; renderShell();
+  try { state = await api('/api/state'); loading=false; renderShell(); }
+  catch(e){ localStorage.removeItem('cipher_token'); token=''; state=null; loading=false; renderAuth(); }
+}
+function renderAuth(){
+  app.innerHTML = `<section class="auth-shell"><div class="auth-card">
+    <div class="hero"><div class="logo"><div class="mark">✦</div>CipherDrop</div><h1>Anonymous notes that vanish after one open.</h1><p>Create an account to receive a private 6 digit auth code and an 8 digit password. Share only your code. Other users can request to add you, and you must accept before they can message you.</p>
+    <div class="demo"><div class="demo-row"><span>Step 1</span><span>Create your anonymous inbox</span></div><div class="demo-row"><span>Step 2</span><span>Save the generated password</span></div><div class="demo-row"><span>Step 3</span><span>Exchange codes and approve requests</span></div></div></div>
+    <form class="auth-form" id="authForm"><div class="tabs"><button type="button" class="${authTab==='login'?'active':''}" data-tab="login">Login</button><button type="button" class="${authTab==='register'?'active':''}" data-tab="register">Create account</button></div>
+      <div id="authFields">${authFields()}</div><button class="btn primary" type="submit">${authTab==='login'?'Enter dashboard':'Create secure inbox'}</button><div class="error" id="authErr"></div>
+      <p class="footer-note">Demo storage is local JSON on the server. Passwords are hashed; the generated 8 digit password is shown only once when creating an account.</p></form>
+  </div></section>`;
+  $('#authForm').addEventListener('click', e=>{ if(e.target.dataset.tab){ authTab=e.target.dataset.tab; renderAuth(); }});
+  $('#authForm').addEventListener('submit', handleAuth);
+}
+function authFields(){
+  if(authTab==='register') return `<div class="field"><label>Display name</label><input class="input" name="displayName" placeholder="Anonymous Fox" maxlength="28" required></div><div class="field"><label>Avatar emoji</label><input class="input" name="avatar" placeholder="🦊" maxlength="4"></div>`;
+  return `<div class="field"><label>6 digit auth code</label><input class="input" name="authCode" inputmode="numeric" pattern="\\d{6}" maxlength="6" placeholder="104829" required></div><div class="field"><label>8 digit password</label><input class="input" name="password" inputmode="numeric" pattern="\\d{8}" maxlength="8" placeholder="48291037" required></div>`;
+}
+async function handleAuth(e){
+  e.preventDefault(); const fd=new FormData(e.currentTarget); const err=$('#authErr'); err.textContent='';
+  try{
+    if(authTab==='login'){
+      const data=await api('/api/login',{method:'POST',body:JSON.stringify({authCode:fd.get('authCode'),password:fd.get('password')})}); token=data.token; state=data.state; localStorage.setItem('cipher_token',token); toast('Welcome back.'); renderShell();
+    } else {
+      const data=await api('/api/register',{method:'POST',body:JSON.stringify({displayName:fd.get('displayName'),avatar:fd.get('avatar')})}); token=data.token; state=data.state; localStorage.setItem('cipher_token',token); view='profile'; toast(`Your password is ${data.password}. Save it now.`); renderShell(); showModal('Save your login', `<p class="muted">This generated password is shown once.</p><div class="secret">Auth code: ${state.user.authCode}\nPassword: ${data.password}</div>`, 'I saved it');
+    }
+  }catch(ex){ err.textContent=ex.message; }
+}
+function renderShell(){
+  if(!state){ app.innerHTML = `<div class="app"><aside class="sidebar"></aside><main class="main"><div class="skeleton"></div><br><div class="skeleton"></div></main></div>`; return; }
+  const c=counts();
+  app.innerHTML = `<div class="app"><aside class="sidebar" id="sidebar"><div class="side-top"><div class="logo"><div class="mark">✦</div>CipherDrop</div><button class="btn small mobile-menu" onclick="$('#sidebar').classList.remove('open')">Close</button></div><nav class="nav">
+    ${navBtn('dashboard','Dashboard')} ${navBtn('inbox','Inbox',c.unread)} ${navBtn('sent','Sent',c.sent)} ${navBtn('contacts','Contacts',c.contacts)} ${navBtn('requests','Requests',c.reqs)} ${navBtn('profile','Profile')}
+  </nav><div class="me-card"><div class="row"><div class="avatar">${esc(state.user.avatar)}</div><div><strong>${esc(state.user.displayName)}</strong><br><span class="code">${state.user.authCode}</span></div></div><button class="btn danger" style="width:100%;margin-top:14px" onclick="logout()">Logout</button></div></aside><main class="main"><button class="btn mobile-menu" onclick="$('#sidebar').classList.add('open')">☰ Menu</button><div id="content"></div></main></div>`;
+  renderContent();
+}
+function navBtn(id,label,badge){ return `<button class="${view===id?'active':''}" onclick="setView('${id}')"><span>${label}</span>${badge?`<span class="badge">${badge}</span>`:''}</button>`; }
+function renderContent(){ const el=$('#content'); if(!el)return; ({dashboard, inbox, sent, contacts, requests, profile}[view]||dashboard)(el); }
+function header(title, sub, action=''){ return `<div class="topbar"><div><h2>${title}</h2><div class="muted">${sub}</div></div><div class="actions">${action}</div></div>`; }
+function dashboard(el){ const c=counts(); const recent=state.messages.slice(0,4); el.innerHTML= header('Dashboard','Your private command center.',`<button class="btn primary" onclick="setView('sent')">Compose</button>`)+`<div class="stat-grid"><div class="stat"><span class="muted">Unread</span><br><strong>${c.unread}</strong></div><div class="stat"><span class="muted">Contacts</span><br><strong>${c.contacts}</strong></div><div class="stat"><span class="muted">Requests</span><br><strong>${c.reqs}</strong></div><div class="stat"><span class="muted">Total notes</span><br><strong>${state.messages.length}</strong></div></div><br><div class="grid two"><section class="card"><h3>Recent one-time messages</h3><div class="list">${recent.length?recent.map(messageItem).join(''):empty('🕳️','No messages yet','Accepted contacts can send notes that vanish after opening.')}</div></section><section class="card"><h3>Add by auth code</h3>${addForm()}</section></div>`; bindAdd(); }
+function inbox(el){ const msgs=state.messages.filter(m=>m.toUserId===state.user.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)); el.innerHTML= header('Inbox','Open carefully: unread notes are destroyed after one view.')+`<div class="card"><div class="list">${msgs.length?msgs.map(messageItem).join(''):empty('📭','Inbox empty','When accepted contacts send one-time notes, they appear here.')}</div></div>`; }
+function sent(el){ const contacts=state.contacts; const msgs=state.messages.filter(m=>m.fromUserId===state.user.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)); el.innerHTML= header('Sent & compose','Create, edit, or delete unread one-time messages.')+`<div class="grid two"><section class="card"><h3>Compose one-time note</h3>${contacts.length?composeForm():empty('🤝','No accepted contacts','Add a user by code and wait for acceptance before messaging.')}</section><section class="card"><h3>Sent notes</h3><div class="list">${msgs.length?msgs.map(messageItem).join(''):empty('✉️','Nothing sent','Your outgoing notes will show here.')}</div></section></div>`; bindCompose(); }
+function contacts(el){ el.innerHTML= header('Contacts','Accepted connections can exchange anonymous one-time notes.')+`<div class="grid two"><section class="card"><h3>Add a user</h3>${addForm()}</section><section class="card"><h3>Your contacts</h3><div class="list">${state.contacts.length?state.contacts.map(c=>`<div class="item"><div class="row"><div class="avatar">${esc(c.user.avatar)}</div><div><h3>${esc(c.user.displayName)}</h3><div class="muted code">${c.user.authCode}</div><div class="muted">${esc(c.user.status||'')}</div></div></div><div class="actions"><button class="btn small primary" onclick="quickCompose('${c.user.id}')">Message</button><button class="btn small danger" onclick="removeContact('${c.user.id}')">Remove</button></div></div>`).join(''):empty('🧊','No contacts yet','Type someone’s 6 digit code to send a request.')}</div></section></div>`; bindAdd(); }
+function requests(el){ const incoming=state.requests.filter(r=>r.toUserId===state.user.id&&r.status==='pending'); const outgoing=state.requests.filter(r=>r.fromUserId===state.user.id&&r.status==='pending'); const other=state.requests.filter(r=>r.status!=='pending'); el.innerHTML= header('Add requests','Typing someone’s code sends a request they must accept.')+`<div class="grid two"><section class="card"><h3>Incoming</h3><div class="list">${incoming.length?incoming.map(requestItem).join(''):empty('✅','No pending incoming requests','New code requests will appear here.')}</div></section><section class="card"><h3>Outgoing</h3><div class="list">${outgoing.length?outgoing.map(requestItem).join(''):empty('📨','No outgoing requests','Add a user by 6 digit code.')}</div></section></div><br><section class="card"><h3>History</h3><div class="list">${other.length?other.map(requestItem).join(''):empty('🗂️','No request history','Accepted and rejected requests show here.')}</div></section>`; }
+function profile(el){ el.innerHTML= header('Profile','Manage your anonymous identity and shareable code.')+`<div class="grid two"><section class="card"><h3>Your login</h3><p class="muted">Share only your auth code with people you want to connect with. Keep your 8 digit password secret.</p><div class="secret">Auth code: ${state.user.authCode}</div></section><section class="card"><h3>Edit profile</h3><form id="profileForm" class="composer"><div class="field"><label>Display name</label><input class="input" name="displayName" value="${esc(state.user.displayName)}"></div><div class="field"><label>Avatar</label><input class="input" name="avatar" maxlength="4" value="${esc(state.user.avatar)}"></div><div class="field"><label>Status</label><input class="input" name="status" maxlength="90" value="${esc(state.user.status||'')}"></div><button class="btn primary">Save profile</button></form></section></div>`; $('#profileForm').onsubmit=saveProfile; }
+function empty(icon,title,sub){return `<div class="empty"><div class="big">${icon}</div><strong>${title}</strong><br><span>${sub}</span></div>`;}
+function messageItem(m){ const me=state.user.id; const incoming=m.toUserId===me; const other=incoming?m.fromUser:m.toUser; return `<div class="item"><div class="item-main"><div class="row"><div class="avatar">${esc(other?.avatar||'👤')}</div><div><h3>${incoming?'From':'To'} ${esc(other?.displayName||'Unknown')}</h3><span class="pill">${m.status==='unread'?'Unread / live':'Destroyed'}</span> <span class="muted">${fmt(m.createdAt)}</span></div></div><p class="muted">${m.status==='destroyed'?'This note has been destroyed.':esc(m.body).slice(0,120)}</p></div><div class="actions">${incoming&&m.status==='unread'?`<button class="btn small primary" onclick="openMsg('${m.id}')">Open once</button>`:''}${!incoming&&m.status==='unread'?`<button class="btn small" onclick="editMsg('${m.id}')">Edit</button>`:''}<button class="btn small danger" onclick="deleteMsg('${m.id}')">Delete</button></div></div>`; }
+function requestItem(r){ const incoming=r.toUserId===state.user.id; const other=incoming?r.fromUser:r.toUser; return `<div class="item"><div class="row"><div class="avatar">${esc(other?.avatar||'👤')}</div><div><h3>${esc(other?.displayName||'Unknown')}</h3><div class="muted code">${other?.authCode||''}</div><span class="pill">${r.status}</span> <span class="muted">${fmt(r.createdAt)}</span>${r.note?`<p class="muted">${esc(r.note)}</p>`:''}</div></div><div class="actions">${incoming&&r.status==='pending'?`<button class="btn small good" onclick="actReq('${r.id}','accept')">Accept</button><button class="btn small danger" onclick="actReq('${r.id}','reject')">Reject</button>`:''}${!incoming&&r.status==='pending'?`<button class="btn small danger" onclick="actReq('${r.id}','cancel')">Cancel</button>`:''}</div></div>`; }
+function addForm(){return `<form id="addForm" class="composer"><div class="field"><label>6 digit auth code</label><input class="input" name="authCode" inputmode="numeric" maxlength="6" pattern="\\d{6}" placeholder="728406" required></div><div class="field"><label>Optional note</label><input class="input" name="note" maxlength="120" placeholder="I'd like to connect."></div><button class="btn primary">Send add request</button></form>`;}
+function composeForm(selected=''){return `<form id="composeForm" class="composer"><div class="field"><label>Recipient</label><select class="input" name="toUserId">${state.contacts.map(c=>`<option value="${c.user.id}" ${selected===c.user.id?'selected':''}>${esc(c.user.displayName)} · ${c.user.authCode}</option>`).join('')}</select></div><div class="field"><label>One-time message</label><textarea name="body" maxlength="1000" placeholder="Type a secret that will disappear after opening..." required></textarea></div><button class="btn primary">Send one-time message</button></form>`;}
+function bindAdd(){ const f=$('#addForm'); if(f) f.onsubmit=async e=>{e.preventDefault(); const fd=new FormData(f); const previous=structuredClone(state); const fake={id:'tmp',fromUserId:state.user.id,toUserId:'pending',status:'pending',note:fd.get('note'),createdAt:new Date().toISOString(),fromUser:state.user,toUser:{displayName:'Pending user',authCode:fd.get('authCode'),avatar:'…'}}; state.requests.unshift(fake); renderShell(); try{state=await api('/api/requests',{method:'POST',body:JSON.stringify({authCode:fd.get('authCode'),note:fd.get('note')})}); toast('Request sent. They must accept it.'); renderShell();}catch(ex){state=previous; renderShell(); toast(ex.message);}} }
+function bindCompose(){ const f=$('#composeForm'); if(f) f.onsubmit=async e=>{e.preventDefault(); const fd=new FormData(f); try{state=await api('/api/messages',{method:'POST',body:JSON.stringify({toUserId:fd.get('toUserId'),body:fd.get('body')})}); toast('One-time message sent.'); renderShell();}catch(ex){toast(ex.message);} } }
+async function refresh(promiseMsg, fn){ try{ state=await fn(); toast(promiseMsg); renderShell(); }catch(e){ toast(e.message); } }
+async function actReq(id, action){ await refresh(action==='accept'?'Request accepted.': action==='reject'?'Request rejected.':'Request cancelled.', async()=>api(`/api/requests/${id}`,{method:'PATCH',body:JSON.stringify({action})})); }
+async function removeContact(id){ if(confirm('Remove this contact?')) await refresh('Contact removed.', async()=>api(`/api/contacts/${id}`,{method:'DELETE'})); }
+async function deleteMsg(id){ if(confirm('Delete this message record?')) await refresh('Message deleted.', async()=>api(`/api/messages/${id}`,{method:'DELETE'})); }
+async function openMsg(id){ try{ const data=await api(`/api/messages/${id}`,{method:'PATCH',body:JSON.stringify({action:'open'})}); state=data.state; renderShell(); showModal('One-time message opened', `<p class="muted">This secret has now been destroyed on the server.</p><div class="secret">${esc(data.opened.body)}</div>`, 'Destroy view'); }catch(e){toast(e.message);} }
+function editMsg(id){ const m=state.messages.find(x=>x.id===id); showModal('Edit outgoing note', `<form id="editForm" class="composer"><textarea name="body" maxlength="1000" required>${esc(m.body)}</textarea><button class="btn primary">Save edit</button></form>`, 'Cancel'); setTimeout(()=>{$('#editForm').onsubmit=async e=>{e.preventDefault(); const body=new FormData(e.currentTarget).get('body'); document.querySelector('.modal-backdrop')?.remove(); await refresh('Message updated.', async()=>api(`/api/messages/${id}`,{method:'PATCH',body:JSON.stringify({body})}));};},0); }
+function quickCompose(id){ view='sent'; renderShell(); setTimeout(()=>{ const f=$('#composeForm'); if(f){ f.toUserId.value=id; f.body.focus(); }},0); }
+async function saveProfile(e){ e.preventDefault(); const fd=new FormData(e.currentTarget); await refresh('Profile saved.', async()=>api('/api/me',{method:'PATCH',body:JSON.stringify({displayName:fd.get('displayName'),avatar:fd.get('avatar'),status:fd.get('status')})})); }
+async function logout(){ try{ await api('/api/logout',{method:'POST'});}catch{} token=''; state=null; localStorage.removeItem('cipher_token'); renderAuth(); }
+function showModal(title, html, close='Close'){ const b=document.createElement('div'); b.className='modal-backdrop'; b.innerHTML=`<div class="modal"><h2>${title}</h2>${html}<div class="actions" style="margin-top:18px"><button class="btn primary" id="modalClose">${close}</button></div></div>`; document.body.appendChild(b); $('#modalClose',b).onclick=()=>b.remove(); b.addEventListener('click',e=>{if(e.target===b)b.remove();}); }
+window.setView=setView; window.logout=logout; window.actReq=actReq; window.removeContact=removeContact; window.deleteMsg=deleteMsg; window.openMsg=openMsg; window.editMsg=editMsg; window.quickCompose=quickCompose; window.$=$;
+init();
